@@ -6,9 +6,9 @@
  */
 
 #import "TiModule.h"
+#import <AppsFlyerLib/AppsFlyerLib.h>
 
-@interface TiAppsflyerModule : TiModule <UIApplicationDelegate> {
-
+@interface TiAppsflyerModule : TiModule <UIApplicationDelegate, AppsFlyerLibDelegate, AppsFlyerDeepLinkDelegate> {
 }
 
 - (void)initialize:(id)args;
@@ -22,5 +22,9 @@
 - (void)fetchAdvertisingIdentifier:(id)callback;
 
 - (void)logEvent:(id)args;
+
+- (void)generateInviteLink:(id)args;
+
+- (void)logInvite:(id)args;
 
 @end

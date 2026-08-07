@@ -10,7 +10,12 @@
 package ti.appsflyer
 
 import android.os.AsyncTask
+import com.appsflyer.AppsFlyerConversionListener
 import com.appsflyer.AppsFlyerLib
+import com.appsflyer.deeplink.DeepLink
+import com.appsflyer.deeplink.DeepLinkListener
+import com.appsflyer.share.LinkGenerator
+import com.appsflyer.share.ShareInviteHelper
 import com.google.android.gms.ads.identifier.AdvertisingIdClient
 import com.google.android.gms.common.GooglePlayServicesNotAvailableException
 import com.google.android.gms.common.GooglePlayServicesRepairableException
@@ -25,30 +30,77 @@ import java.io.IOException
 
 @Kroll.module(name = "TitaniumAppsFlyer", id = "ti.appsflyer")
 class TitaniumAppsFlyerModule: KrollModule() {
+	private val appContext
+		get() = TiApplication.getInstance().applicationContext
+
+	private val conversionListener = object : AppsFlyerConversionListener {
+		override fun onConversionDataSuccess(conversionData: MutableMap<String, Any>?) {
+			val event = KrollDict()
+			event["success"] = true
+			event["data"] = conversionData?.let { KrollDict(it) } ?: KrollDict()
+			fireEvent("conversionData", event)
+		}
+
+		override fun onConversionDataFail(error: String?) {
+			val event = KrollDict()
+			event["success"] = false
+			event["error"] = error ?: "Unable to retrieve AppsFlyer conversion data"
+			fireEvent("conversionData", event)
+		}
+
+		// Unified Deep Linking is the primary source of app-open attribution.
+		override fun onAppOpenAttribution(attributionData: MutableMap<String, String>?) = Unit
+
+		override fun onAttributionFailure(error: String?) = Unit
+	}
+
+	private val deepLinkListener = DeepLinkListener { result ->
+		val deepLink = result.deepLink
+		val event = KrollDict()
+
+		event["status"] = result.status.name
+		event["isDeferred"] = deepLink?.isDeferred() ?: false
+		event["deepLinkValue"] = deepLink?.getDeepLinkValue()
+
+		for (index in 1..10) {
+			event["deepLinkSub$index"] = deepLinkStringValue(deepLink, "deep_link_sub$index")
+		}
+
+		event["parameters"] = deepLinkParameters(deepLink)
+		event["error"] = result.error?.name
+		fireEvent("deepLink", event)
+	}
 
 	@Kroll.method
 	fun initialize(params: KrollDict) {
 		val devKey = params.getString("devKey")
 		val debugEnabled = params.optBoolean("debug", false)
+		val appsFlyer = AppsFlyerLib.getInstance()
 
-		AppsFlyerLib.getInstance().init(devKey, null, TiApplication.getInstance().applicationContext)
-		AppsFlyerLib.getInstance().setDebugLog(debugEnabled)
+		(params["appInviteOneLinkID"] as? String)
+			?.takeIf { it.isNotEmpty() }
+			?.let { appsFlyer.setAppInviteOneLink(it) }
+
+		appsFlyer.init(devKey, conversionListener, appContext)
+		// AppsFlyer requires the UDL listener to be registered before start().
+		appsFlyer.subscribeForDeepLink(deepLinkListener)
+		appsFlyer.setDebugLog(debugEnabled)
 	}
 
 	@Kroll.method
 	fun start() {
-		AppsFlyerLib.getInstance().start(TiApplication.getInstance().applicationContext)
+		AppsFlyerLib.getInstance().start(appContext)
 	}
 
 	@Kroll.method
 	fun logEvent(eventName: String, parameters: KrollDict) {
-		AppsFlyerLib.getInstance().logEvent(TiApplication.getInstance().applicationContext, eventName, parameters)
+		AppsFlyerLib.getInstance().logEvent(appContext, eventName, parameters)
 	}
 
 	@Kroll.method
 	fun logPurchase(parameters: KrollDict) {
 		AppsFlyerLib.getInstance().validateAndLogInAppPurchase(
-			TiApplication.getInstance().applicationContext,
+			appContext,
 			parameters.getString("publicKey"),
 			parameters.getString("signature"),
 			parameters.getString("transactionId"),
@@ -60,13 +112,102 @@ class TitaniumAppsFlyerModule: KrollModule() {
 
 	@Kroll.method
 	fun updateUninstallToken(pushToken: String) {
-		AppsFlyerLib.getInstance().updateServerUninstallToken(TiApplication.getInstance().applicationContext, pushToken)
+		AppsFlyerLib.getInstance().updateServerUninstallToken(appContext, pushToken)
+	}
+
+	@Kroll.method
+	fun generateInviteLink(params: KrollDict, callback: KrollFunction) {
+		val parameters = stringParameters(params["parameters"])
+		if (parameters == null) {
+			callInviteCallback(callback, null, "parameters must contain only string keys and values")
+			return
+		}
+
+		try {
+			val generator = ShareInviteHelper.generateInviteUrl(appContext)
+			(params["channel"] as? String)?.takeIf { it.isNotEmpty() }?.let { generator.setChannel(it) }
+			(params["campaign"] as? String)?.takeIf { it.isNotEmpty() }?.let { generator.setCampaign(it) }
+			if (parameters.isNotEmpty()) {
+				generator.addParameters(parameters)
+			}
+
+			generator.generateLink(appContext, object : LinkGenerator.ResponseListener {
+				override fun onResponse(url: String) {
+					if (url.isNotEmpty()) {
+						callInviteCallback(callback, url, null)
+					} else {
+						callInviteCallback(callback, null, "AppsFlyer returned an empty invite URL")
+					}
+				}
+
+				override fun onResponseError(error: String) {
+					callInviteCallback(callback, null, error.ifEmpty { "Unable to generate AppsFlyer invite URL" })
+				}
+			})
+		} catch (exception: Exception) {
+			callInviteCallback(callback, null, exception.message ?: "Unable to generate AppsFlyer invite URL")
+		}
+	}
+
+	@Kroll.method
+	fun logInvite(channel: String, parameters: KrollDict) {
+		val stringParameters = stringParameters(parameters) ?: emptyMap()
+		ShareInviteHelper.logInvite(appContext, channel, stringParameters)
 	}
 
 	@Kroll.method
 	fun fetchAdvertisingIdentifier(callback: KrollFunction) {
 		val task = TiAdvertisingIDTask(callback, getKrollObject())
 		task.execute()
+	}
+
+	private fun callInviteCallback(callback: KrollFunction, url: String?, error: String?) {
+		val result = KrollDict()
+		result["success"] = url != null
+		if (url != null) {
+			result["url"] = url
+		} else {
+			result["error"] = error ?: "Unable to generate AppsFlyer invite URL"
+		}
+		callback.callAsync(krollObject, result)
+	}
+
+	private fun deepLinkParameters(deepLink: DeepLink?): KrollDict {
+		if (deepLink == null) {
+			return KrollDict()
+		}
+
+		return try {
+			KrollDict(deepLink.clickEvent)
+		} catch (exception: Exception) {
+			KrollDict()
+		}
+	}
+
+	private fun deepLinkStringValue(deepLink: DeepLink?, key: String): String? {
+		return try {
+			deepLink?.getStringValue(key)
+		} catch (exception: Exception) {
+			null
+		}
+	}
+
+	private fun stringParameters(value: Any?): Map<String, String>? {
+		if (value == null) {
+			return emptyMap()
+		}
+		if (value !is Map<*, *>) {
+			return null
+		}
+
+		val result = mutableMapOf<String, String>()
+		for ((key, parameterValue) in value) {
+			if (key !is String || parameterValue !is String) {
+				return null
+			}
+			result[key] = parameterValue
+		}
+		return result
 	}
 }
 
