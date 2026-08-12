@@ -10,6 +10,7 @@
 package ti.appsflyer
 
 import android.os.AsyncTask
+import android.util.Log
 import com.appsflyer.AppsFlyerConversionListener
 import com.appsflyer.AppsFlyerLib
 import com.appsflyer.deeplink.DeepLink
@@ -30,11 +31,22 @@ import java.io.IOException
 
 @Kroll.module(name = "TitaniumAppsFlyer", id = "ti.appsflyer")
 class TitaniumAppsFlyerModule: KrollModule() {
+	private var debugLoggingEnabled = false
+
 	private val appContext
 		get() = TiApplication.getInstance().applicationContext
 
 	private val conversionListener = object : AppsFlyerConversionListener {
 		override fun onConversionDataSuccess(conversionData: MutableMap<String, Any>?) {
+			if (debugLoggingEnabled) {
+				Log.i(
+					LOG_TAG,
+					"conversionData callback success=true status=${conversionData?.get("af_status") ?: "unknown"} " +
+						"firstLaunch=${conversionData?.get("is_first_launch") ?: false} " +
+						"hasDeepLinkValue=${conversionData?.containsKey("deep_link_value") == true} " +
+						"hasDeepLinkSub1=${conversionData?.containsKey("deep_link_sub1") == true}"
+				)
+			}
 			val event = KrollDict()
 			event["success"] = true
 			event["data"] = conversionData?.let { KrollDict(it) } ?: KrollDict()
@@ -42,6 +54,9 @@ class TitaniumAppsFlyerModule: KrollModule() {
 		}
 
 		override fun onConversionDataFail(error: String?) {
+			if (debugLoggingEnabled) {
+				Log.i(LOG_TAG, "conversionData callback success=false hasError=${!error.isNullOrEmpty()}")
+			}
 			val event = KrollDict()
 			event["success"] = false
 			event["error"] = error ?: "Unable to retrieve AppsFlyer conversion data"
@@ -56,6 +71,15 @@ class TitaniumAppsFlyerModule: KrollModule() {
 
 	private val deepLinkListener = DeepLinkListener { result ->
 		val deepLink = result.deepLink
+		if (debugLoggingEnabled) {
+			Log.i(
+				LOG_TAG,
+				"deepLink callback status=${result.status.name} deferred=${deepLink?.isDeferred() ?: false} " +
+					"hasDeepLinkValue=${!deepLink?.getDeepLinkValue().isNullOrEmpty()} " +
+					"hasDeepLinkSub1=${!deepLinkStringValue(deepLink, "deep_link_sub1").isNullOrEmpty()} " +
+					"hasError=${result.error != null}"
+			)
+		}
 		val event = KrollDict()
 
 		event["status"] = result.status.name
@@ -75,20 +99,37 @@ class TitaniumAppsFlyerModule: KrollModule() {
 	fun initialize(params: KrollDict) {
 		val devKey = params.getString("devKey")
 		val debugEnabled = params.optBoolean("debug", false)
+		val oneLinkCustomDomains = oneLinkCustomDomains(params["oneLinkCustomDomains"])
 		val appsFlyer = AppsFlyerLib.getInstance()
+		debugLoggingEnabled = debugEnabled
+		// AppsFlyer recommends enabling debug output before initialization.
+		appsFlyer.setDebugLog(debugEnabled)
 
 		(params["appInviteOneLinkID"] as? String)
 			?.takeIf { it.isNotEmpty() }
 			?.let { appsFlyer.setAppInviteOneLink(it) }
 
+		if (oneLinkCustomDomains.isNotEmpty()) {
+			appsFlyer.setOneLinkCustomDomain(*oneLinkCustomDomains.toTypedArray())
+		}
+
 		appsFlyer.init(devKey, conversionListener, appContext)
 		// AppsFlyer requires the UDL listener to be registered before start().
 		appsFlyer.subscribeForDeepLink(deepLinkListener)
-		appsFlyer.setDebugLog(debugEnabled)
+		if (debugLoggingEnabled) {
+			Log.i(
+				LOG_TAG,
+				"initialized customDomainCount=${oneLinkCustomDomains.size} " +
+					"conversionListenerConfigured=true deepLinkListenerConfigured=true"
+			)
+		}
 	}
 
 	@Kroll.method
 	fun start() {
+		if (debugLoggingEnabled) {
+			Log.i(LOG_TAG, "start requested")
+		}
 		AppsFlyerLib.getInstance().start(appContext)
 	}
 
@@ -192,6 +233,42 @@ class TitaniumAppsFlyerModule: KrollModule() {
 		}
 	}
 
+	private fun oneLinkCustomDomains(value: Any?): List<String> {
+		if (value == null) {
+			return emptyList()
+		}
+		if (value !is Array<*>) {
+			throw IllegalArgumentException("oneLinkCustomDomains must be an array of hostname strings")
+		}
+
+		return value.map { domain ->
+			if (domain !is String || !isValidHostname(domain)) {
+				throw IllegalArgumentException(
+					"oneLinkCustomDomains must contain hostname-only strings without schemes, paths, or queries"
+				)
+			}
+			domain
+		}
+	}
+
+	private fun isValidHostname(value: String): Boolean {
+		if (value.isEmpty() || value.length > 253) {
+			return false
+		}
+
+		return value.split('.').all { label ->
+			label.isNotEmpty() &&
+				label.length <= 63 &&
+				isAsciiLetterOrDigit(label.first()) &&
+				isAsciiLetterOrDigit(label.last()) &&
+				label.all { character -> isAsciiLetterOrDigit(character) || character == '-' }
+		}
+	}
+
+	private fun isAsciiLetterOrDigit(value: Char): Boolean {
+		return value in 'a'..'z' || value in 'A'..'Z' || value in '0'..'9'
+	}
+
 	private fun stringParameters(value: Any?): Map<String, String>? {
 		if (value == null) {
 			return emptyMap()
@@ -208,6 +285,10 @@ class TitaniumAppsFlyerModule: KrollModule() {
 			result[key] = parameterValue
 		}
 		return result
+	}
+
+	private companion object {
+		const val LOG_TAG = "ti.appsflyer"
 	}
 }
 

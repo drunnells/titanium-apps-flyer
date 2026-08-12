@@ -38,8 +38,9 @@ AppsFlyer.addEventListener('conversionData', event => {
 
 AppsFlyer.initialize({
   devKey: 'YOUR_DEV_KEY',
-  appID: 'idXXXXXXXXX', // iOS only; use the App Store ID
-  appInviteOneLinkID: 'H5hv',
+  appID: 'XXXXXXXXX', // iOS only; use the numeric App Store ID without the id prefix
+  appInviteOneLinkID: 'YOUR_ONELINK_TEMPLATE_ID',
+  oneLinkCustomDomains: ['links.example.com'],
   authorizationTimeout: 60, // iOS only; defers SDK processing for ATT
   debug: false
 });
@@ -48,6 +49,10 @@ AppsFlyer.start();
 ```
 
 `appInviteOneLinkID` is the template ID from the AppsFlyer OneLink template, not a full URL. Set it in `initialize()` before `start()` when using invite links.
+
+`oneLinkCustomDomains` is optional and enables AppsFlyer Branded Domains on iOS and Android. Each value must be a hostname such as `links.example.com`, without a URL scheme, path, query, fragment, or port. Omit the property or pass an empty array to retain the default AppsFlyer behavior.
+
+When `debug` is enabled, the module logs privacy-safe initialization and callback summaries with the `ti.appsflyer` tag. These summaries report statuses and whether deep-link fields are present, but never log their values. The normal `deepLink` and `conversionData` event payloads are unchanged.
 
 ## User invite links
 

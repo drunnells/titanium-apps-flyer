@@ -18,9 +18,13 @@
 
 @interface TiAppsflyerModule ()
 
+@property(nonatomic, assign) BOOL debugLoggingEnabled;
+
 - (void)callInviteCallback:(KrollCallback *)callback url:(NSString *)url error:(NSString *)error;
 - (void)emitEvent:(NSString *)name payload:(NSDictionary *)payload;
 - (NSString *)deepLinkStringValue:(AppsFlyerDeepLink *)deepLink key:(NSString *)key;
+- (NSArray<NSString *> *)oneLinkCustomDomainsFromValue:(id)value;
+- (BOOL)isValidHostname:(NSString *)value;
 - (NSDictionary *)stringParametersFromValue:(id)value valid:(BOOL *)valid;
 
 @end
@@ -73,23 +77,41 @@
   NSInteger authorizationTimeout = [TiUtils intValue:args[@"authorizationTimeout"] def:-1];
   BOOL debugMode = [TiUtils boolValue:args[@"debug"] def:NO];
   NSString *appInviteOneLinkID = [args[@"appInviteOneLinkID"] isKindOfClass:[NSString class]] ? args[@"appInviteOneLinkID"] : nil;
+  NSArray<NSString *> *oneLinkCustomDomains = [self oneLinkCustomDomainsFromValue:args[@"oneLinkCustomDomains"]];
 
+  self.debugLoggingEnabled = debugMode;
+  // AppsFlyer recommends enabling debug output before configuring other SDK properties.
+  [[AppsFlyerLib shared] setIsDebug:debugMode];
   [[AppsFlyerLib shared] setAppsFlyerDevKey:devKey];
   [[AppsFlyerLib shared] setAppleAppID:appID];
-  [[AppsFlyerLib shared] setIsDebug:debugMode];
   [[AppsFlyerLib shared] setUseUninstallSandbox:debugMode];
 
   if (appInviteOneLinkID.length > 0) {
     [[AppsFlyerLib shared] setAppInviteOneLink:appInviteOneLinkID];
   }
 
+  if (oneLinkCustomDomains.count > 0) {
+    [[AppsFlyerLib shared] setOneLinkCustomDomains:oneLinkCustomDomains];
+  }
+
   if (authorizationTimeout != -1) {
     [[AppsFlyerLib shared] waitForATTUserAuthorizationWithTimeoutInterval:authorizationTimeout];
+  }
+
+  if (self.debugLoggingEnabled) {
+    NSLog(@"[ti.appsflyer] initialized customDomainCount=%lu authorizationTimeoutConfigured=%@ conversionDelegateConfigured=%@ deepLinkDelegateConfigured=%@",
+        (unsigned long)oneLinkCustomDomains.count,
+        authorizationTimeout != -1 ? @"true" : @"false",
+        [AppsFlyerLib shared].delegate == self ? @"true" : @"false",
+        [AppsFlyerLib shared].deepLinkDelegate == self ? @"true" : @"false");
   }
 }
 
 - (void)start:(id)unused
 {
+  if (self.debugLoggingEnabled) {
+    NSLog(@"[ti.appsflyer] start requested");
+  }
   [[AppsFlyerLib shared] start];
 }
 
@@ -206,6 +228,15 @@
   }
 
   AppsFlyerDeepLink *deepLink = result.deepLink;
+  NSString *deepLinkSub1 = [self deepLinkStringValue:deepLink key:@"deep_link_sub1"];
+  if (self.debugLoggingEnabled) {
+    NSLog(@"[ti.appsflyer] deepLink callback status=%@ deferred=%@ hasDeepLinkValue=%@ hasDeepLinkSub1=%@ hasError=%@",
+        status,
+        deepLink != nil && deepLink.isDeferred ? @"true" : @"false",
+        deepLink.deeplinkValue.length > 0 ? @"true" : @"false",
+        deepLinkSub1.length > 0 ? @"true" : @"false",
+        result.error != nil ? @"true" : @"false");
+  }
   NSMutableDictionary *event = [NSMutableDictionary dictionaryWithDictionary:@{
     @"status" : status,
     @"isDeferred" : @(deepLink != nil ? deepLink.isDeferred : NO),
@@ -225,6 +256,17 @@
 
 - (void)onConversionDataSuccess:(NSDictionary *)conversionInfo
 {
+  if (self.debugLoggingEnabled) {
+    NSString *status = [conversionInfo[@"af_status"] isKindOfClass:[NSString class]] ? conversionInfo[@"af_status"] : @"";
+    BOOL isFirstLaunch = [TiUtils boolValue:conversionInfo[@"is_first_launch"] def:NO];
+    NSString *deepLinkValue = [conversionInfo[@"deep_link_value"] isKindOfClass:[NSString class]] ? conversionInfo[@"deep_link_value"] : @"";
+    NSString *deepLinkSub1 = [conversionInfo[@"deep_link_sub1"] isKindOfClass:[NSString class]] ? conversionInfo[@"deep_link_sub1"] : @"";
+    NSLog(@"[ti.appsflyer] conversionData callback success=true status=%@ firstLaunch=%@ hasDeepLinkValue=%@ hasDeepLinkSub1=%@",
+        status.length > 0 ? status : @"unknown",
+        isFirstLaunch ? @"true" : @"false",
+        deepLinkValue.length > 0 ? @"true" : @"false",
+        deepLinkSub1.length > 0 ? @"true" : @"false");
+  }
   [self emitEvent:@"conversionData"
           payload:@{
             @"success" : @YES,
@@ -234,6 +276,9 @@
 
 - (void)onConversionDataFail:(NSError *)error
 {
+  if (self.debugLoggingEnabled) {
+    NSLog(@"[ti.appsflyer] conversionData callback success=false hasError=%@", error != nil ? @"true" : @"false");
+  }
   [self emitEvent:@"conversionData"
           payload:@{
             @"success" : @NO,
@@ -292,6 +337,51 @@
     return [value stringValue];
   }
   return nil;
+}
+
+- (NSArray<NSString *> *)oneLinkCustomDomainsFromValue:(id)value
+{
+  if (value == nil || value == [NSNull null]) {
+    return @[];
+  }
+  if (![value isKindOfClass:[NSArray class]]) {
+    [self throwException:TiExceptionInvalidType
+               subreason:@"oneLinkCustomDomains must be an array of hostname strings"
+                location:CODELOCATION];
+    return @[];
+  }
+
+  NSMutableArray<NSString *> *domains = [NSMutableArray array];
+  for (id domain in value) {
+    if (![domain isKindOfClass:[NSString class]] || ![self isValidHostname:domain]) {
+      [self throwException:TiExceptionInvalidType
+                 subreason:@"oneLinkCustomDomains must contain hostname-only strings without schemes, paths, or queries"
+                  location:CODELOCATION];
+      return @[];
+    }
+    [domains addObject:domain];
+  }
+  return domains;
+}
+
+- (BOOL)isValidHostname:(NSString *)value
+{
+  if (value.length == 0 || value.length > 253) {
+    return NO;
+  }
+
+  NSCharacterSet *alphanumericCharacters = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"];
+  NSCharacterSet *hostnameCharacters = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"];
+
+  for (NSString *label in [value componentsSeparatedByString:@"."]) {
+    if (label.length == 0 || label.length > 63
+        || ![alphanumericCharacters characterIsMember:[label characterAtIndex:0]]
+        || ![alphanumericCharacters characterIsMember:[label characterAtIndex:label.length - 1]]
+        || [label rangeOfCharacterFromSet:[hostnameCharacters invertedSet]].location != NSNotFound) {
+      return NO;
+    }
+  }
+  return YES;
 }
 
 - (NSDictionary *)stringParametersFromValue:(id)value valid:(BOOL *)valid

@@ -26,6 +26,7 @@ AppsFlyer.initialize({
   devKey: 'YOUR_DEV_KEY',
   appID: 'idXXXXXXXXX', // iOS only
   appInviteOneLinkID: 'YOUR_ONELINK_TEMPLATE_ID',
+  oneLinkCustomDomains: ['links.example.com'],
   debug: false
 });
 
